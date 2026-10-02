@@ -1,6 +1,6 @@
 'use strict';
 
-let state = { materials: [], equipment: [], events: [], batches: [], label_rolls: [], shipments: [] };
+let state = { materials: [], equipment: [], events: [], batches: [], label_rolls: [], shipments: [], downtime_windows: [] };
 let editingEventId = null;
 
 const $ = (sel) => document.querySelector(sel);
@@ -80,6 +80,7 @@ async function refresh() {
   renderEvents();
   renderBase();
   renderLots();
+  renderDowntime();
 }
 
 function renderResidue() {
@@ -699,6 +700,86 @@ window.deleteEquipment = async (id) => {
   if (!confirm('删除该设备？其下仍有事件时不允许删除。')) return;
   try { await api(`/api/equipment/${id}`, { method: 'DELETE' }); await refresh(); }
   catch (err) { notice('error', err.error || '删除失败', err.details); }
+};
+
+// ================= 检修停机窗口 =================
+function renderDowntime() {
+  const rows = (state.downtime_windows || []).slice()
+    .sort((a, b) => a.start_time.localeCompare(b.start_time) || a.id - b.id);
+  $('#downtimeRows').innerHTML = rows.length ? rows.map((w) => `
+    <tr>
+      <td>${esc(w.equipment_name)} <span class="batch-meta">(${esc(w.equipment_code)})</span></td>
+      <td>${esc(fmtTime(w.start_time))}</td>
+      <td>${esc(fmtTime(w.end_time))}</td>
+      <td>${esc(w.reason)}</td>
+      <td>${esc(w.operator)}</td>
+      <td>${(w.conflicting_events && w.conflicting_events.length)
+        ? `<span class="badge invalid">${w.conflicting_events.length} 条冲突</span>`
+        : '<span class="badge active">无</span>'}</td>
+      <td class="row-actions">
+        <button class="btn small" onclick='editDowntime(${JSON.stringify({ id: w.id, equipment_id: w.equipment_id, start_time: w.start_time, end_time: w.end_time, reason: w.reason, operator: w.operator }).replace(/'/g, '&#39;')})'>调整</button>
+        <button class="btn small danger" onclick="deleteDowntime(${w.id})">取消</button>
+      </td>
+    </tr>`).join('')
+    : '<tr><td colspan="7" class="batch-meta">尚无停机窗口；点右上“登记停机窗口”新增。窗口内不能记录加工或清洗（停机不等于清洗）。</td></tr>';
+}
+
+$('#btnNewDowntime').onclick = () => {
+  const f = $('#downtimeForm');
+  f.reset(); f.id.value = '';
+  $('#downtimeModalTitle').textContent = '登记停机窗口';
+  $('#dtEquipment').innerHTML = state.equipment
+    .map((q) => `<option value="${q.id}">${esc(q.name)}（${esc(q.code)}）</option>`).join('');
+  $('#downtimeModal').classList.remove('hidden');
+};
+window.editDowntime = (w) => {
+  const f = $('#downtimeForm');
+  f.reset();
+  $('#downtimeModalTitle').textContent = `调整停机窗口 #${w.id}`;
+  $('#dtEquipment').innerHTML = state.equipment
+    .map((q) => `<option value="${q.id}">${esc(q.name)}（${esc(q.code)}）</option>`).join('');
+  f.id.value = w.id;
+  f.equipment_id.value = w.equipment_id;
+  f.start_time.value = w.start_time;
+  f.end_time.value = w.end_time;
+  f.reason.value = w.reason;
+  f.operator.value = w.operator;
+  $('#downtimeModal').classList.remove('hidden');
+};
+$('#downtimeForm').onsubmit = async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  const body = {
+    equipment_id: parseInt(f.equipment_id.value, 10),
+    start_time: f.start_time.value,
+    end_time: f.end_time.value,
+    reason: f.reason.value.trim(),
+    operator: f.operator.value.trim()
+  };
+  try {
+    if (f.id.value) {
+      await api(`/api/downtime-windows/${f.id.value}`, { method: 'PUT', body });
+      notice('ok', '停机窗口已调整（此后事件、补录与换线均按新窗口核对）');
+    } else {
+      await api('/api/downtime-windows', { method: 'POST', body });
+      notice('ok', '停机窗口已登记（检修期间不能记录加工或清洗）');
+    }
+    $('#downtimeModal').classList.add('hidden');
+    await refresh();
+  } catch (err) {
+    const items = (err.details && err.details.length ? err.details : [])
+      .concat((err.conflicts || []).map((c) =>
+        `冲突事件 #${c.event_id}（${c.event_time}，${c.type === 'CLEAN' ? '清洗' : '加工'}${c.batch_code ? '，批次 ' + c.batch_code : ''}）`));
+    notice('error', err.error || '保存失败', items.length ? items : undefined);
+  }
+};
+window.deleteDowntime = async (id) => {
+  if (!confirm('取消该停机窗口？取消后该时段可重新记录加工/清洗。')) return;
+  try {
+    await api(`/api/downtime-windows/${id}`, { method: 'DELETE' });
+    await refresh();
+    notice('ok', '停机窗口已取消');
+  } catch (err) { notice('error', err.error || '取消失败', err.details); }
 };
 
 $$('[data-close]').forEach((b) => b.onclick = (e) => e.target.closest('.modal').classList.add('hidden'));

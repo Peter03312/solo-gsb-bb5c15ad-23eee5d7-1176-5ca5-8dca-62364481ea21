@@ -373,7 +373,10 @@ const FINGERPRINT_SQL = [
   `SELECT id, shipment_id, decision, decided_by, basis, expected_version, context_hash,
           context_snapshot, status_version, life_status, stale_reason, decided_at
      FROM shipment_dispositions ORDER BY id`,
-  `SELECT shipment_id, version FROM shipment_versions ORDER BY shipment_id`
+  `SELECT shipment_id, version FROM shipment_versions ORDER BY shipment_id`,
+  // 停机窗口同样纳入指纹：窗口登记/调整/取消后，旧预演版本过期，确认应用须重新预演核对。
+  `SELECT id, equipment_id, start_time, end_time, reason, operator, created_at, updated_at
+     FROM equipment_downtime_windows ORDER BY id`
 ];
 function stateFingerprint(db) {
   const h = crypto.createHash('sha256');
@@ -682,6 +685,8 @@ function openShadow(sourceDb) {
   copy('shipment_items', 'id,shipment_id,roll_id,roll_code,release_id,release_at,release_by,allergen_set,roll_revision,qty');
   copy('shipment_dispositions', 'id,shipment_id,decision,decided_by,basis,expected_version,context_hash,context_snapshot,status_version,life_status,stale_reason,decided_at,created_at');
   copy('shipment_versions', 'shipment_id,version');
+  // 停机窗口一并拷入影子库：预演按整组变更后的最终设备与时间核对窗口（不写正式数据）。
+  copy('equipment_downtime_windows', 'id,equipment_id,start_time,end_time,reason,operator,created_at,updated_at');
   shadow.pragma('foreign_keys = ON');
   return shadow;
 }

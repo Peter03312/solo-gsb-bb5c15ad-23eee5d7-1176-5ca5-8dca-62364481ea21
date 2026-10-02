@@ -8,7 +8,8 @@ function memDb() {
   db.exec(`CREATE TABLE equipment(id INTEGER PRIMARY KEY);
     CREATE TABLE batches(id INTEGER PRIMARY KEY, code TEXT);
     CREATE TABLE events(id INTEGER PRIMARY KEY, event_time TEXT, type TEXT, equipment_id INTEGER, batch_id INTEGER);
-    CREATE TABLE process_inputs(id INTEGER PRIMARY KEY, event_id INTEGER, material_id INTEGER, batch_id INTEGER);`);
+    CREATE TABLE process_inputs(id INTEGER PRIMARY KEY, event_id INTEGER, material_id INTEGER, batch_id INTEGER);
+    CREATE TABLE equipment_downtime_windows(id INTEGER PRIMARY KEY, equipment_id INTEGER, start_time TEXT, end_time TEXT, reason TEXT, operator TEXT);`);
   db.prepare('INSERT INTO equipment(id) VALUES (1),(2)').run();
   return db;
 }

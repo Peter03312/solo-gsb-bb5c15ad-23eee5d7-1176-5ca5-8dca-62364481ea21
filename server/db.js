@@ -242,6 +242,25 @@ function initSchema(d) {
     UNIQUE (backfill_id, external_ref)
   );
 
+  -- 设备检修停机窗口：检修期间不能记录加工或清洗。
+  --   窗口为左闭右开区间 [start_time, end_time)，起点须早于终点；
+  --   同设备窗口不可重叠（相邻允许：一个的终点可等于另一个的起点）；
+  --   登记/调整时若覆盖已有加工/清洗事件则整次拒绝（见 downtime.js）；
+  --   事件新增/更正、断网补录、换线预演与确认应用均按最终设备与时间核对窗口
+  --   （见 validation.js 全量校验）。
+  --   停机不等于清洗：窗口不是事件，不改变设备残留或过敏原推导，不触发重算联动。
+  CREATE TABLE IF NOT EXISTS equipment_downtime_windows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    equipment_id INTEGER NOT NULL REFERENCES equipment(id),
+    start_time TEXT NOT NULL,          -- 窗口起点（左闭，含该时刻），ISO 如 2026-10-09T08:00
+    end_time TEXT NOT NULL,            -- 窗口终点（右开，不含该时刻）
+    reason TEXT NOT NULL DEFAULT '',   -- 停机原因
+    operator TEXT NOT NULL DEFAULT '', -- 操作人
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    CHECK (start_time < end_time)
+  );
+
   CREATE INDEX IF NOT EXISTS idx_events_time ON events(event_time, id);
   CREATE INDEX IF NOT EXISTS idx_process_inputs_event ON process_inputs(event_id);
   CREATE INDEX IF NOT EXISTS idx_material_lots_material ON material_lots(material_id);
@@ -258,6 +277,7 @@ function initSchema(d) {
   -- 外部记录号查询索引：同号同内容允许跨包复用（指向同一既有事件，不重复写入），
   -- 故不加全局唯一约束；“同号不同内容整包拒绝”在提交校验中按首次出现记录比对哈希强制。
   CREATE INDEX IF NOT EXISTS idx_backfill_records_external ON backfill_records(external_ref);
+  CREATE INDEX IF NOT EXISTS idx_downtime_windows_equipment ON equipment_downtime_windows(equipment_id);
   `);
 
   // ---- 旧库迁移（CREATE TABLE IF NOT EXISTS 不会为既有表补列）----

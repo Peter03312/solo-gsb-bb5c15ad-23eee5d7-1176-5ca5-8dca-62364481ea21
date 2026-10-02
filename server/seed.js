@@ -105,6 +105,18 @@ function seedIfEmpty() {
     matInput(e7, 'SALT-01');
 
     clean('15:00', lineA, '班后已核实清洗');
+
+    // ---- 设备检修停机窗口（演示数据）----
+    // 两个相邻窗口（一个的终点=另一个的起点，相邻允许）：检修期间不能记录加工或清洗；
+    // 停机不等于清洗，不改变设备残留或过敏原推导。
+    const insWindow = db.prepare(
+      `INSERT INTO equipment_downtime_windows (equipment_id, start_time, end_time, reason, operator)
+       VALUES (?,?,?,?,?)`
+    );
+    insWindow.run(lineA, '2026-10-09T08:00', '2026-10-09T10:00',
+      '月度检修：更换搅拌桨密封', '设备科-张工');
+    insWindow.run(lineA, '2026-10-09T10:00', '2026-10-09T12:00',
+      '月度检修：输送带张紧校准', '设备科-张工');
   });
   insertBase();
 

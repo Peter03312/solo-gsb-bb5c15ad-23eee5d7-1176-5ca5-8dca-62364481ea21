@@ -18,6 +18,7 @@
   <button class="tab" data-tab="shipments">包装出货</button>
   <button class="tab" data-tab="trace">原料批号追溯</button>
   <button class="tab" data-tab="events">事件时间线（加工 / 清洗）</button>
+  <button class="tab" data-tab="downtime">检修停机</button>
   <button class="tab" data-tab="base">原料与设备</button>
 </nav>
 
@@ -119,6 +120,25 @@
       <button class="btn primary" id="btnNewEvent">＋ 录入事件</button>
     </div>
     <div id="eventList" class="event-list"></div>
+  </section>
+
+  <!-- ============ 检修停机窗口视图 ============ -->
+  <section id="tab-downtime" class="tab-panel">
+    <div class="panel-head">
+      <h2>设备检修停机窗口</h2>
+      <button class="btn primary" id="btnNewDowntime">＋ 登记停机窗口</button>
+    </div>
+    <p class="section-hint">
+      检修期间<b>不能记录加工或清洗</b>。窗口为<b>左闭右开</b>区间 [开始, 结束)，起点须早于终点；
+      同设备窗口<b>不可重叠</b>（相邻允许：一个的终点可等于另一个的起点）。
+      登记或调整若<b>覆盖已有加工/清洗事件</b>将整次拒绝并列出冲突事件；
+      事件新增/更正、断网补录与换线预演/确认均按最终设备与时间核对窗口。
+      <b>停机不等于清洗</b>：不改变设备残留或过敏原推导。
+    </p>
+    <table class="grid">
+      <thead><tr><th>设备</th><th>开始（含）</th><th>结束（不含）</th><th>原因</th><th>操作人</th><th>冲突事件</th><th></th></tr></thead>
+      <tbody id="downtimeRows"></tbody>
+    </table>
   </section>
 
   <!-- ============ 基础数据 ============ -->
@@ -260,6 +280,40 @@
       <div class="modal-actions">
         <button type="button" class="btn" data-close>取消</button>
         <button type="submit" class="btn primary">保存</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ============ 停机窗口弹窗 ============ -->
+<div id="downtimeModal" class="modal hidden">
+  <div class="modal-box">
+    <h3 id="downtimeModalTitle">登记停机窗口</h3>
+    <form id="downtimeForm">
+      <input type="hidden" name="id">
+      <div class="form-row">
+        <label>设备 <span class="req">*</span></label>
+        <select name="equipment_id" id="dtEquipment" required></select>
+      </div>
+      <div class="form-row">
+        <label>开始时间（含）<span class="req">*</span></label>
+        <input type="datetime-local" name="start_time" required>
+      </div>
+      <div class="form-row">
+        <label>结束时间（不含）<span class="req">*</span></label>
+        <input type="datetime-local" name="end_time" required>
+      </div>
+      <div class="form-row">
+        <label>停机原因 <span class="req">*</span></label>
+        <input type="text" name="reason" required placeholder="如：月度检修">
+      </div>
+      <div class="form-row">
+        <label>操作人 <span class="req">*</span></label>
+        <input type="text" name="operator" required placeholder="姓名/工号">
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn" data-close>取消</button>
+        <button type="submit" class="btn primary">保存（覆盖已有事件将整次拒绝）</button>
       </div>
     </form>
   </div>

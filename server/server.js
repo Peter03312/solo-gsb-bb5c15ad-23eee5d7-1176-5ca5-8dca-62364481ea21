@@ -11,6 +11,7 @@ const shipments = require('./shipments');
 const evaluation = require('./evaluation');
 const lots = require('./lots');
 const backfill = require('./backfill');
+const downtime = require('./downtime');
 const { traceMaterial } = require('./trace');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -198,7 +199,10 @@ app.get('/api/state', (req, res) => {
   const shipment_rows = db.prepare('SELECT * FROM shipments ORDER BY id DESC').all();
   const shipments_list = shipment_rows.map((s) => shipments.formatShipment(s, db));
 
-  res.json({ materials, equipment, events, batches, label_rolls, shipments: shipments_list });
+  // 设备检修停机窗口（含各窗口当前覆盖的冲突事件，正常恒为空：两侧写入均拒绝冲突）。
+  const downtime_windows = downtime.listWindows(db);
+
+  res.json({ materials, equipment, events, batches, label_rolls, shipments: shipments_list, downtime_windows });
 });
 
 // ---------- 通用：在事务中写事件集 -> 校验 -> 重算 ----------
@@ -324,6 +328,66 @@ function normalizeEquipment(body) {
   if (!code) throw new Error('设备编码不能为空');
   if (!name) throw new Error('设备名称不能为空');
   return { code, name };
+}
+
+// ---------- 设备检修停机窗口 ----------
+// 登记：body { equipment_id|equipment_code, start_time, end_time, reason, operator }
+// 左闭右开 [start, end)，起点须早于终点；同设备不可重叠（相邻允许）；
+// 覆盖已有加工/清洗事件 -> 409 WINDOW_EVENT_CONFLICT（附 conflicts 明细），整次拒绝。
+app.post('/api/downtime-windows', (req, res) => {
+  try {
+    res.json(downtime.createWindow(db, req.body || {}));
+  } catch (err) { sendDowntimeError(res, err); }
+});
+
+// 查询窗口及冲突事件：?equipment_id= 可选过滤
+app.get('/api/downtime-windows', (req, res) => {
+  let equipment_id = null;
+  if (req.query.equipment_id !== undefined) {
+    equipment_id = parseInt(req.query.equipment_id, 10);
+    if (!Number.isInteger(equipment_id)) {
+      return res.status(400).json({ error: 'equipment_id 不合法', code: 'INVALID_REQUEST' });
+    }
+  }
+  res.json({ windows: downtime.listWindows(db, { equipment_id }) });
+});
+
+app.get('/api/downtime-windows/:id', (req, res) => {
+  try {
+    res.json(downtime.getWindowOrThrow(db, parseInt(req.params.id, 10)));
+  } catch (err) { sendDowntimeError(res, err); }
+});
+
+// 调整（全量覆盖：设备/起止/原因/操作人）；冲突整次拒绝、原窗口不变。
+app.put('/api/downtime-windows/:id', (req, res) => {
+  try {
+    res.json(downtime.updateWindow(db, parseInt(req.params.id, 10), req.body || {}));
+  } catch (err) { sendDowntimeError(res, err); }
+});
+
+// 取消窗口
+app.delete('/api/downtime-windows/:id', (req, res) => {
+  try {
+    res.json(downtime.deleteWindow(db, parseInt(req.params.id, 10)));
+  } catch (err) { sendDowntimeError(res, err); }
+});
+
+function sendDowntimeError(res, err) {
+  if (err && err.name === 'DowntimeError') {
+    if (err.code === 'WINDOW_NOT_FOUND' || err.code === 'EQUIPMENT_NOT_FOUND') {
+      return res.status(404).json({ error: err.message, code: err.code, details: err.details });
+    }
+    const status = (err.code === 'WINDOW_OVERLAP' || err.code === 'WINDOW_EVENT_CONFLICT')
+      ? 409 : 400;
+    return res.status(status).json({
+      error: err.message,
+      code: err.code,
+      details: err.details,
+      conflicts: err.conflicts
+    });
+  }
+  console.error(err);
+  return res.status(500).json({ error: err && err.message ? err.message : '服务器内部错误' });
 }
 
 // ---------- 原料供应批号 ----------

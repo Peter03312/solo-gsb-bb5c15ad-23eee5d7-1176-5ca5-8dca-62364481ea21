@@ -12,6 +12,10 @@
 逐时传播，**全清截断全部设备残留；部分清洗按来源原料的过敏原逐项截断**（尚有未清除过敏原
 或原料无过敏原登记时不能排除批号，只有全清截断）；结果分**确定命中**与**因批号未知无法排除**
 两类并给出传播依据与关联出货单，事件更正/删除后按最新合法时间线更新。**追溯仅供查询，不自动改变放行、卷、出货与处置结论。**
+设备断网期间的加工/清洗日志可用**补录批号整包补录**（整包事务、同号同内容幂等、外部记录号复用、按批号对账）。
+**设备检修停机窗口**按设备登记/调整/取消（起止时间、原因、操作人；左闭右开、同设备不重叠、相邻允许）：
+**检修期间不能记录加工或清洗**——登记/调整窗口覆盖已有事件、或在窗口内新增/更正事件、断网补录、
+换线预演与确认，均按最终设备和时间核对并整次拒绝；**停机不等于清洗**，不改变设备残留或过敏原推导。
 
 - 后端：Node.js + Express
 - 数据库：SQLite（[better-sqlite3](https://github.com/WiseLibs/better-sqlite3)，数据文件本地保存）
@@ -888,6 +892,118 @@ curl -s http://localhost:3000/api/backfills
 | 按补录批号对账不存在 | 404 | `BACKFILL_NOT_FOUND` |
 
 
+## 设备检修停机窗口（本轮新增）
+
+设备检修期间**不能记录加工或清洗**。操作员可按设备**登记、调整、取消**停机窗口，
+填写**起止时间、原因和操作人**，并查询窗口及其覆盖的冲突事件：
+
+- 窗口为**左闭右开区间** `[start_time, end_time)`：事件时刻 `t` 命中窗口当且仅当 `start_time ≤ t < end_time`；
+  **起点须早于终点**。
+- **同设备窗口不可重叠，相邻允许**（一个窗口的终点可等于另一个的起点）；不同设备的窗口互不影响。
+- **登记或调整若覆盖已有加工/清洗事件**：返回 `409 WINDOW_EVENT_CONFLICT` 与冲突事件明细（`conflicts`），
+  **整次拒绝**（调整时原窗口保持不变）。
+- 此后**单条事件新增或更正**（`POST/PUT /api/events`）、**断网整包补录**（`POST /api/backfills`）、
+  **换线整组预演与确认应用**（`/api/replan/preview|apply`）均按**最终设备和时间**核对窗口：
+  命中时在 `details` 中指出冲突的事件与窗口，**整次拒绝**——不改变现有事件、推导结果或补录台账，
+  预演不写正式数据。
+- **已成功补录的同号同内容重试仍返回原结果**（幂等优先：命中既有补录批号 + 相同内容时直接返回首次结果，
+  不重新核对窗口、不重复写入）。
+- **窗口变动后旧预演的确认也须重新核对**：窗口登记/调整/取消会使既有预演版本过期
+  （`apply` 返回 `409 VERSION_EXPIRED`），需重新预演；重新预演即按最新窗口核对。
+- **停机不等于清洗**：窗口不是事件，**不改变设备残留或过敏原推导**，不触发放行失效、
+  标签卷停用、出货待评估或处置结论重评等重算联动；窗口接口响应不含这些联动字段。
+
+### HTTP API
+
+| 方法与路径 | 说明 |
+| --- | --- |
+| `POST /api/downtime-windows` | 登记停机窗口（`equipment_id` 或 `equipment_code` 二选一 + `start_time`/`end_time`/`reason`/`operator`），返回窗口对象 |
+| `GET /api/downtime-windows` | 窗口列表（可 `?equipment_id=` 过滤），每项含 `conflicting_events`（窗口当前覆盖的事件，正常恒为空） |
+| `GET /api/downtime-windows/:id` | 单个窗口（含冲突事件） |
+| `PUT /api/downtime-windows/:id` | 调整窗口（全量覆盖：设备/起止/原因/操作人）；冲突整次拒绝、原窗口不变 |
+| `DELETE /api/downtime-windows/:id` | 取消窗口 |
+| `GET /api/state` | 顶层另含 `downtime_windows` 数组（既有字段不变） |
+| `POST/PUT /api/events`、`POST /api/backfills`、`POST /api/replan/preview|apply` | 请求/响应形状不变；命中窗口时按既有错误形状在 `details` 中给出冲突原因并整次拒绝 |
+
+窗口对象字段：`id`、`equipment_id`、`equipment_code`、`equipment_name`、`start_time`、`end_time`、
+`reason`、`operator`、`created_at`、`updated_at`、`conflicting_events[]`
+（每项：`event_id`/`event_time`/`type`/`equipment_id`/`equipment_code`/`batch_code`/`note`）。
+
+### 调用示例（curl，基于演示数据）
+
+演示库自带 LINE-A 上两个**相邻**的检修窗口：`2026-10-09T08:00–10:00`（更换搅拌桨密封）与
+`2026-10-09T10:00–12:00`（输送带张紧校准，起点=前一窗口终点，相邻允许）。
+
+```bash
+# 1) 查询窗口及冲突事件（可按设备过滤）
+curl -s http://localhost:3000/api/downtime-windows
+curl -s 'http://localhost:3000/api/downtime-windows?equipment_id=1'
+# -> { windows:[{ id:1, equipment_code:"LINE-A", start_time:"2026-10-09T08:00",
+#      end_time:"2026-10-09T10:00", reason:"月度检修：更换搅拌桨密封",
+#      operator:"设备科-张工", conflicting_events:[] }, ...] }
+
+# 2) 登记新窗口（检修期间不能记录加工或清洗）
+curl -s -X POST http://localhost:3000/api/downtime-windows \
+  -H 'Content-Type: application/json' -d '{
+    "equipment_code":"FRYER-B","start_time":"2026-10-10T08:00","end_time":"2026-10-10T12:00",
+    "reason":"季度大修","operator":"设备科-李工"
+  }'
+
+# 3) 同设备重叠 -> 409 WINDOW_OVERLAP（相邻不算重叠）
+curl -s -X POST http://localhost:3000/api/downtime-windows \
+  -H 'Content-Type: application/json' -d '{
+    "equipment_id":1,"start_time":"2026-10-09T09:00","end_time":"2026-10-09T11:00",
+    "reason":"x","operator":"y"
+  }'
+# -> { error:"…与已有停机窗口重叠：同设备窗口不可重叠（相邻允许），整次拒绝",
+#      code:"WINDOW_OVERLAP", details:["窗口 #1 [2026-10-09T08:00, 2026-10-09T10:00)…", ...] }
+
+# 4) 登记/调整覆盖已有事件 -> 409 WINDOW_EVENT_CONFLICT，返回冲突事件明细
+curl -s -X POST http://localhost:3000/api/downtime-windows \
+  -H 'Content-Type: application/json' -d '{
+    "equipment_id":1,"start_time":"2026-09-30T07:00","end_time":"2026-09-30T09:00",
+    "reason":"突发检修","operator":"张工"
+  }'
+# -> { code:"WINDOW_EVENT_CONFLICT",
+#      conflicts:[{ event_id:1, event_time:"2026-09-30T08:00", type:"PROCESS",
+#                   equipment_code:"LINE-A", batch_code:"BATCH-001", ... }] }
+
+# 5) 窗口内新增/更正事件 -> 400，details 指出冲突的事件与窗口，整次回滚
+curl -s -X POST http://localhost:3000/api/events \
+  -H 'Content-Type: application/json' -d '{
+    "type":"PROCESS","event_time":"2026-10-09T08:30","equipment_id":1,
+    "batch_code":"BATCH-X","material_ids":[1]
+  }'
+# -> { error:"提交被拒绝（整次提交已回滚）",
+#      details:["事件 #N（2026-10-09T08:30，设备 #1）落入设备检修停机窗口
+#                [2026-10-09T08:00, 2026-10-09T10:00)（窗口 #1，原因：月度检修…）：检修期间不能记录加工或清洗"] }
+#    事件时刻恰为窗口终点（右开）则允许；补录包内记录命中窗口 -> 400 BACKFILL_REJECTED（整包回滚，台账不写）；
+#    换线预演命中窗口 -> 400 REPLAN_REJECTED（不写正式数据）。
+
+# 6) 调整 / 取消窗口
+curl -s -X PUT http://localhost:3000/api/downtime-windows/3 \
+  -H 'Content-Type: application/json' -d '{
+    "equipment_id":2,"start_time":"2026-10-10T08:00","end_time":"2026-10-10T14:00",
+    "reason":"季度大修（延长）","operator":"设备科-李工"
+  }'
+curl -s -X DELETE http://localhost:3000/api/downtime-windows/3
+
+# 7) 窗口变动后旧预演版本过期：先 preview 取 version，登记/调整/取消任一窗口后
+#    再 apply 该 version -> 409 VERSION_EXPIRED，需重新预演（重新预演即按最新窗口核对）。
+```
+
+| 场景 | HTTP | `code` |
+| --- | --- | --- |
+| 缺设备/起止时间格式错/起点不早于终点/缺原因/缺操作人/id 与编码同传/过滤参数非法 | 400 | `INVALID_REQUEST` |
+| 设备不存在 | 404 | `EQUIPMENT_NOT_FOUND` |
+| 窗口不存在（查询/调整/取消） | 404 | `WINDOW_NOT_FOUND` |
+| 同设备窗口重叠（登记或调整） | 409 | `WINDOW_OVERLAP` |
+| 覆盖已有加工/清洗事件（登记或调整，附 `conflicts` 明细） | 409 | `WINDOW_EVENT_CONFLICT` |
+| 事件新增/更正命中窗口 | 400 | （既有事件校验形状，`details` 指出冲突） |
+| 补录命中窗口（整包回滚，不写台账） | 400 | `BACKFILL_REJECTED` |
+| 换线预演/确认命中窗口 | 400 | `REPLAN_REJECTED` |
+| 窗口变动后确认旧预演版本 | 409 | `VERSION_EXPIRED` |
+
 ## 一键启动（Docker，从空环境开始）
 
 要求安装 Docker 与 Docker Compose（v2）。在项目目录执行：
@@ -929,6 +1045,7 @@ npm run test:evaluations # 端到端验证待评估单质量处置：评估视�
 npm run test:trace       # 端到端验证供应批号登记/投料批号/追溯传播（直接/引用/残留/清洗截断/未知无法排除）/更正删除更新/换线带批号/只读不改动
 npm run test:partial-clean # 端到端验证部分清洗：入参校验/只清指定过敏原/重算联动（放行/卷/出货/处置）/追溯按过敏原保留设备传播/全清与无过敏原原料/换线预演确认
 npm run test:backfill     # 端到端验证断网日志整包补录：整包事务/包内引用/幂等重试/外部记录号复用与冲突/重算联动（放行/卷/出货/处置）/对账（OK/MISMATCH/DELETED）/旧接口兼容
+npm run test:downtime     # 端到端验证设备检修停机窗口：登记/调整/取消/查询、左闭右开与相邻允许、覆盖事件整次拒绝、事件/补录/换线核对、幂等重试优先、停机不等于清洗
 ```
 
 ## 访问地址与端口
@@ -974,6 +1091,9 @@ npm run test:backfill     # 端到端验证断网日志整包补录：整包事�
 - **原料批号追溯**：选择原料与供应批号（或“批号未知”）查询流向，分区展示**确定命中**与**因批号未知无法排除**
   的批次（各自传播依据链、传播方式与关联出货单）以及最后清洗后仍可能滞留批号的设备残留；可从“原料与设备”
   页的批号行一键“追溯流向”。追溯只读，不改动任何业务结论。
+- **检修停机**：按设备登记/调整/取消停机窗口（起止时间、原因、操作人），列表展示各窗口
+  （左闭右开区间、冲突事件数）；登记或调整覆盖已有加工/清洗事件时整次拒绝并列出冲突事件；
+  窗口内不能记录加工或清洗（停机不等于清洗，不改变设备残留或推导）。
 - **原料与设备**：维护原料档案（编码、名称、过敏原标签）、设备档案与**原料供应批号**（登记/通报异常 FLAGGED/解除/删除）。
 
 ## 快速体验失效场景
@@ -992,7 +1112,8 @@ npm run test:backfill     # 端到端验证断网日志整包补录：整包事�
 ```
 server/
   db.js          # SQLite 连接与表结构（导出 initSchema 供内存影子库复用）
-  validation.js  # 全量校验（未来批次/循环/时间冲突/重复产出）
+  validation.js  # 全量校验（未来批次/循环/时间冲突/重复产出/事件落入停机窗口）
+  downtime.js    # 设备检修停机窗口：登记/调整/取消/查询（左闭右开、同设备不重叠相邻允许、覆盖事件整次拒绝）；事件落窗核对供全量校验复用
   recompute.js   # 推导引擎：回放事件、批次并集、设备残留（全清/部分清洗按过敏原清除）、放行核对、标签卷停用核对、出货单待评估核对
   labels.js      # 过敏原标签卷：三方一致登记、按修订号核销、永久停用
   shipments.js   # 包装出货：整单事务分配、快照保存、可出货余额、待评估联动（不自动恢复）
@@ -1001,8 +1122,8 @@ server/
   trace.js       # 批号流向追溯：逐时回放（直接投料/前序引用/设备残留；全清截断、部分清洗按来源过敏原逐次截断）、确定命中与批号未知无法排除、关联出货单
   backfill.js    # 断网日志整包补录：有序记录（外部记录号/时间/设备，加工含产出批次/原料批号可未知/引用批次，清洗省略范围=全清非空=部分）；整包事务校验+重算；同批号同内容幂等、同号复用/冲突拒绝；补录批号对账（OK/MISMATCH/DELETED）
   replan.js      # 整组换线：影子库预演、业务版本签名令牌、事务确认应用（update/insert_clean 支持 clean_allergens 清洗范围；update 支持 material_inputs 带批号）
-  seed.js        # 首次启动演示数据（含供应批号、同原料多批号投料、一卷演示标签卷与一张演示出货单）
-  server.js      # Express API 与静态页面（含 /api/material-lots、/api/trace/material-lot、/api/label-rolls、/api/shipments、/api/replan/preview|apply、/api/shipments/:id/evaluation|dispositions、/api/backfills 补录与对账）
+  seed.js        # 首次启动演示数据（含供应批号、同原料多批号投料、一卷演示标签卷与一张演示出货单、两个相邻检修停机窗口）
+  server.js      # Express API 与静态页面（含 /api/material-lots、/api/trace/material-lot、/api/label-rolls、/api/shipments、/api/replan/preview|apply、/api/shipments/:id/evaluation|dispositions、/api/backfills 补录与对账、/api/downtime-windows 停机窗口）
 public/
   index.html  styles.css  app.js
 scripts/
@@ -1014,5 +1135,6 @@ scripts/
   test-trace.js       # 供应批号与流向追溯：档案/投料批号/三路径传播/清洗截断/未知无法排除/更正删除/换线带批号/只读 端到端测试
   test-partial-clean.js # 部分清洗：入参校验/部分清除推导/重算联动/追溯过敏原级截断/换线预演确认 端到端测试
   test-backfill.js   # 断网日志整包补录：整包事务/包内引用/幂等/外部记录号复用与冲突/重算联动/对账/旧接口兼容 端到端测试
+  test-downtime.js   # 设备检修停机窗口：登记/调整/取消/查询、重叠与相邻、覆盖事件整次拒绝、事件/补录/换线核对、幂等重试优先、停机不等于清洗 端到端测试
 Dockerfile  docker-compose.yml
 ```

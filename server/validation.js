@@ -2,6 +2,8 @@
 // 全量校验：任何新增/修改/删除事件后，在同一事务内对整个事件集重新校验。
 // 返回错误信息数组（中文），为空表示通过。校验失败时调用方回滚整次提交。
 
+const { collectWindowConflicts } = require('./downtime');
+
 function validateAll(db) {
   const errors = [];
 
@@ -98,6 +100,16 @@ function validateAll(db) {
   }
   for (const b of cycleBatches) {
     errors.push(`批次 #${b} 的引用关系形成循环，拒绝提交`);
+  }
+
+  // 4. 设备检修停机窗口：窗口 [起点, 终点) 内不得记录该设备的加工/清洗事件
+  //    （单条事件、断网补录、换线预演/确认应用均经此核对；命中即整次拒绝）。
+  for (const { event: ev, window: w } of collectWindowConflicts(db, events)) {
+    errors.push(
+      `事件 #${ev.id}（${ev.event_time}，设备 #${ev.equipment_id}）落入设备检修停机窗口 ` +
+      `[${w.start_time}, ${w.end_time})（窗口 #${w.id}${w.reason ? `，原因：${w.reason}` : ''}）：` +
+      '检修期间不能记录加工或清洗'
+    );
   }
 
   return errors;
