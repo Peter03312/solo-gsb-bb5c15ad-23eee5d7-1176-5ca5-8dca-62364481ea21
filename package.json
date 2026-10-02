@@ -13,7 +13,8 @@
     "test:evaluations": "node scripts/test-evaluations.js",
     "test:trace": "node scripts/test-trace.js",
     "test:partial-clean": "node scripts/test-partial-clean.js",
-    "test:backfill": "node scripts/test-backfill.js"
+    "test:backfill": "node scripts/test-backfill.js",
+    "test:downtime": "node scripts/test-downtime.js"
   },
   "dependencies": {
     "better-sqlite3": "^11.8.1",

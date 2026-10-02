@@ -18,6 +18,7 @@
   <button class="tab" data-tab="shipments">包装出货</button>
   <button class="tab" data-tab="trace">原料批号追溯</button>
   <button class="tab" data-tab="events">事件时间线（加工 / 清洗）</button>
+  <button class="tab" data-tab="downtime">停机窗口（设备检修）</button>
   <button class="tab" data-tab="base">原料与设备</button>
 </nav>
 
@@ -118,7 +119,42 @@
       <h2>按时间排序的加工与已核实清洗事件</h2>
       <button class="btn primary" id="btnNewEvent">＋ 录入事件</button>
     </div>
+    <div id="activeWindowBanners" class="window-banners"></div>
     <div id="eventList" class="event-list"></div>
+  </section>
+
+  <!-- ============ 停机窗口视图 ============ -->
+  <section id="tab-downtime" class="tab-panel">
+    <div class="panel-head">
+      <h2>设备停机（检修）窗口</h2>
+      <button class="btn primary" id="btnNewWindow">＋ 登记停机窗口</button>
+    </div>
+    <p class="section-hint">
+      窗口为<b>左闭右开区间 [起始, 结束)</b>，起点必须早于终点；<b>同设备窗口不可重叠</b>（首尾相接的相邻窗口允许）。
+      登记或调整若<b>覆盖已有加工/清洗事件</b>，系统返回冲突事件并<b>整次拒绝</b>。
+      窗口生效期间该设备<b>不能记录加工或清洗</b>（单条录入、断网整包补录、换线整组预演/确认均按最终设备与时间核对，命中即整次拒绝）。
+      <b>停机不等于清洗</b>：窗口不改变设备残留与过敏原推导。取消为终态留痕，取消后不再拦截事件，也不能再调整。
+    </p>
+    <form id="windowFilterForm" class="trace-form">
+      <div class="form-row">
+        <label>设备</label>
+        <select name="equipment_id" id="windowFilterEquipment">
+          <option value="">全部设备</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label>状态</label>
+        <select name="status" id="windowFilterStatus">
+          <option value="">全部</option>
+          <option value="ACTIVE">生效中</option>
+          <option value="CANCELLED">已取消</option>
+        </select>
+      </div>
+      <div class="modal-actions">
+        <button type="submit" class="btn primary">查询窗口</button>
+      </div>
+    </form>
+    <div id="windowList" class="event-list"></div>
   </section>
 
   <!-- ============ 基础数据 ============ -->
@@ -366,6 +402,41 @@
   <div class="modal-box wide">
     <h3>待评估出货单 · 质量处置（整单）</h3>
     <div id="evalContent"></div>
+  </div>
+</div>
+
+<!-- ============ 停机窗口弹窗 ============ -->
+<div id="windowModal" class="modal hidden">
+  <div class="modal-box">
+    <h3 id="windowModalTitle">登记停机窗口</h3>
+    <form id="windowForm">
+      <input type="hidden" name="id">
+      <div class="form-row">
+        <label>设备 <span class="req">*</span></label>
+        <select name="equipment_id" id="windowEquipment" required></select>
+      </div>
+      <div class="form-row">
+        <label>起始时间（含）<span class="req">*</span></label>
+        <input type="datetime-local" name="start_at" required>
+      </div>
+      <div class="form-row">
+        <label>结束时间（不含）<span class="req">*</span></label>
+        <input type="datetime-local" name="end_at" required>
+        <small class="hint">左闭右开：起始时刻停机，结束时刻已恢复；起点必须早于终点。</small>
+      </div>
+      <div class="form-row">
+        <label>停机原因</label>
+        <input type="text" name="reason" placeholder="如：计划检修 / 故障抢修">
+      </div>
+      <div class="form-row">
+        <label>操作人 <span class="req">*</span></label>
+        <input type="text" name="operator" placeholder="姓名/工号" required>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn" data-close>取消</button>
+        <button type="submit" class="btn primary" id="windowSubmitBtn">登记窗口</button>
+      </div>
+    </form>
   </div>
 </div>
 

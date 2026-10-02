@@ -11,6 +11,7 @@ const shipments = require('./shipments');
 const evaluation = require('./evaluation');
 const lots = require('./lots');
 const backfill = require('./backfill');
+const downtime = require('./downtime');
 const { traceMaterial } = require('./trace');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -198,7 +199,10 @@ app.get('/api/state', (req, res) => {
   const shipment_rows = db.prepare('SELECT * FROM shipments ORDER BY id DESC').all();
   const shipments_list = shipment_rows.map((s) => shipments.formatShipment(s, db));
 
-  res.json({ materials, equipment, events, batches, label_rolls, shipments: shipments_list });
+  const downtime_windows = downtime.listWindows(db);
+
+  res.json({ materials, equipment, events, batches, label_rolls,
+    shipments: shipments_list, downtime_windows });
 });
 
 // ---------- 通用：在事务中写事件集 -> 校验 -> 重算 ----------
@@ -313,6 +317,14 @@ app.delete('/api/equipment/:id', (req, res) => {
     const used = db.prepare('SELECT COUNT(*) AS c FROM events WHERE equipment_id=?')
       .get(req.params.id).c;
     if (used > 0) return res.status(400).json({ error: '该设备下仍有事件，无法删除' });
+    const windowCount = db.prepare(
+      'SELECT COUNT(*) AS c FROM downtime_windows WHERE equipment_id=?'
+    ).get(req.params.id).c;
+    if (windowCount > 0) {
+      return res.status(400).json({
+        error: `该设备仍登记有 ${windowCount} 个停机窗口台账（含已取消），无法删除设备`
+      });
+    }
     db.prepare('DELETE FROM equipment WHERE id=?').run(req.params.id);
     res.json({ ok: true });
   } catch (err) { badRequest(res, err); }
@@ -396,6 +408,114 @@ app.get('/api/trace/material-lot', (req, res) => {
   }
 });
 
+// ---------- 设备停机（检修）窗口 ----------
+// 登记窗口：左闭右开 [start_at, end_at)，起点早于终点；同设备窗口不可重叠（相邻允许），
+// 覆盖既有加工/清洗事件则整次拒绝（返回冲突事件）。停机不等于清洗，不影响残留与推导。
+app.post('/api/downtime-windows', (req, res) => {
+  try {
+    res.json(downtime.createWindow(db, req.body || {}));
+  } catch (err) { sendDowntimeError(res, err); }
+});
+
+// 查询窗口及冲突事件：可按 ?equipment_id=、?status=ACTIVE|CANCELLED、?with_events=1 过滤。
+app.get('/api/downtime-windows', (req, res) => {
+  let equipment_id = null;
+  if (req.query.equipment_id !== undefined) {
+    equipment_id = parseInt(req.query.equipment_id, 10);
+    if (!Number.isInteger(equipment_id)) {
+      return res.status(400).json({ error: 'equipment_id 不合法', code: 'INVALID_REQUEST' });
+    }
+  }
+  let status = null;
+  if (req.query.status !== undefined) {
+    status = String(req.query.status).toUpperCase();
+    if (status !== 'ACTIVE' && status !== 'CANCELLED') {
+      return res.status(400).json({
+        error: 'status 仅支持 ACTIVE 或 CANCELLED', code: 'INVALID_REQUEST'
+      });
+    }
+  }
+  try {
+    const windows = downtime.listWindows(db, {
+      equipment_id,
+      status,
+      include_events: req.query.with_events === '1'
+    });
+    res.json({ downtime_windows: windows });
+  } catch (err) { sendDowntimeError(res, err); }
+});
+
+// 预检查询（不写库）：给定拟登记/调整的设备与起止时间，返回将覆盖的事件与重叠窗口。
+app.post('/api/downtime-windows/check', (req, res) => {
+  try {
+    const excludeId = req.body && req.body.exclude_id != null
+      ? parseInt(req.body.exclude_id, 10) : null;
+    res.json(downtime.checkWindow(
+      db, req.body || {},
+      Number.isInteger(excludeId) ? excludeId : null
+    ));
+  } catch (err) { sendDowntimeError(res, err); }
+});
+
+app.get('/api/downtime-windows/:id', (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isInteger(id)) {
+    return res.status(400).json({ error: '窗口 id 不合法', code: 'INVALID_REQUEST' });
+  }
+  try {
+    const win = downtime.getWindow(db, id);
+    if (!win) return res.status(404).json({ error: '停机窗口不存在', code: 'WINDOW_NOT_FOUND' });
+    res.json(win);
+  } catch (err) { sendDowntimeError(res, err); }
+});
+
+// 调整窗口（全量覆盖设备/起止/原因/操作人）；同登记规则核对，整次拒绝不改动。
+app.put('/api/downtime-windows/:id', (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isInteger(id)) {
+    return res.status(400).json({ error: '窗口 id 不合法', code: 'INVALID_REQUEST' });
+  }
+  try {
+    res.json(downtime.updateWindow(db, id, req.body || {}));
+  } catch (err) { sendDowntimeError(res, err); }
+});
+
+// 取消窗口（终态留痕）：取消后不再拦截事件；已取消窗口不能重复取消或调整。
+app.post('/api/downtime-windows/:id/cancel', (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isInteger(id)) {
+    return res.status(400).json({ error: '窗口 id 不合法', code: 'INVALID_REQUEST' });
+  }
+  try {
+    res.json(downtime.cancelWindow(db, id, req.body || {}));
+  } catch (err) { sendDowntimeError(res, err); }
+});
+
+function sendDowntimeError(res, err) {
+  if (err && err.name === 'DowntimeError') {
+    if (err.code === 'WINDOW_NOT_FOUND') {
+      return res.status(404).json({
+        error: err.message, code: err.code, details: err.details,
+        conflict_events: err.conflict_events, conflict_windows: err.conflict_windows
+      });
+    }
+    if (err.code === 'EQUIPMENT_NOT_FOUND') {
+      return res.status(404).json({ error: err.message, code: err.code });
+    }
+    const conflict = err.code === 'DOWNTIME_WINDOW_CONFLICT' ||
+      err.code === 'WINDOW_NOT_ACTIVE';
+    return res.status(conflict ? 409 : 400).json({
+      error: err.message,
+      code: err.code,
+      details: err.details,
+      conflict_events: err.conflict_events,
+      conflict_windows: err.conflict_windows
+    });
+  }
+  console.error(err);
+  return res.status(500).json({ error: err && err.message ? err.message : '服务器内部错误' });
+}
+
 // ---------- 事件 ----------
 // body: { event_time, type, equipment_id, batch_code, note, material_ids:[], ref_batch_ids:[] }
 app.post('/api/events', (req, res) => {
@@ -431,6 +551,8 @@ app.post('/api/events', (req, res) => {
             .run(eid, bid);
         }
       }
+      // 停机窗口核对（按最终设备 + 时间）：命中即抛错回滚整次提交。
+      downtime.assertEventAllowed(d, body.equipment_id, body.event_time);
       return eid;
     });
     res.json({ id: ret, invalidated, retired_rolls, pending_shipments, stale_dispositions });
@@ -475,13 +597,21 @@ app.put('/api/events/:id', (req, res) => {
           ? JSON.stringify(body.clean_allergens) : null,
         existing.id
       );
+      // 停机窗口核对（按更正后的最终设备 + 时间）：命中即抛错回滚，事件保持原样。
+      downtime.assertEventAllowed(d, body.equipment_id, body.event_time);
     });
     res.json({ ok: true, invalidated, retired_rolls, pending_shipments, stale_dispositions });
   } catch (err) { sendEventError(res, err); }
 });
 
-// 事件写入错误：批号档案类错误带明确 code；其余沿用原 400 形状。
+// 事件写入错误：批号档案类错误带明确 code；停机窗口冲突 409；其余沿用原 400 形状。
 function sendEventError(res, err) {
+  if (err && err.name === 'DowntimeError') {
+    return res.status(409).json({
+      error: err.message, code: err.code, details: err.details,
+      conflict_windows: err.conflict_windows
+    });
+  }
   if (err && err.name === 'LotError') {
     return res.status(400).json({ error: err.message, code: err.code, details: err.details });
   }
@@ -885,6 +1015,12 @@ app.get('/api/backfills/:code', (req, res) => {
 });
 
 function sendBackfillError(res, err) {
+  if (err && err.name === 'DowntimeError') {
+    return res.status(409).json({
+      error: err.message, code: 'DOWNTIME_WINDOW_CONFLICT',
+      details: err.details, conflict_windows: err.conflict_windows
+    });
+  }
   if (err && err.name === 'BackfillError') {
     if (err.code === 'BACKFILL_NOT_FOUND') {
       return res.status(404).json({ error: err.message, code: err.code, details: err.details });

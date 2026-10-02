@@ -17,6 +17,7 @@ const Database = require('better-sqlite3');
 const { initSchema } = require('./db');
 const { validateAll } = require('./validation');
 const { recompute } = require('./recompute');
+const downtime = require('./downtime');
 
 const PREVIEW_TTL_MS = 30 * 60 * 1000; // 预演版本有效期 30 分钟
 const TIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/;
@@ -373,7 +374,11 @@ const FINGERPRINT_SQL = [
   `SELECT id, shipment_id, decision, decided_by, basis, expected_version, context_hash,
           context_snapshot, status_version, life_status, stale_reason, decided_at
      FROM shipment_dispositions ORDER BY id`,
-  `SELECT shipment_id, version FROM shipment_versions ORDER BY shipment_id`
+  `SELECT shipment_id, version FROM shipment_versions ORDER BY shipment_id`,
+  // 停机窗口纳入指纹：登记/调整/取消窗口后，旧预演版本立即过期，确认必须重新核对。
+  `SELECT id, equipment_id, start_at, end_at, reason, operator, status,
+          cancelled_at, cancelled_by, created_at, updated_at
+     FROM downtime_windows ORDER BY id`
 ];
 function stateFingerprint(db) {
   const h = crypto.createHash('sha256');
@@ -606,6 +611,27 @@ function resolveChangeRefs(db, changes) {
   return resolved;
 }
 
+// ---------- 停机窗口核对（按整组变更后的最终设备 + 最终时间） ----------
+function assertChangesOutsideDowntime(d, resolved) {
+  const specs = resolved.map((c) => ({
+    key: c.op === 'update' ? `事件 #${c.event_id} 的更正` : '拟插入的清洗事件',
+    event_id: c.event_id,
+    equipment_id: c.equipment_id,
+    event_time: c.event_time
+  }));
+  try {
+    downtime.assertEventsAllowed(d, specs, {
+      describe: (spec) => spec.key + `（最终时间 ${spec.event_time}，设备 #${spec.equipment_id}）`
+    });
+  } catch (err) {
+    if (err.name !== 'DowntimeError') throw err;
+    // 整次拒绝；预演不写正式数据，确认在事务内回滚（REPLAN_REJECTED，400）。
+    throw new ReplanError('REPLAN_REJECTED',
+      '整组变更按最终设备与时间核对停机窗口未通过：检修期间不能记录加工或清洗，整次拒绝',
+      err.details || [err.message]);
+  }
+}
+
 // ---------- 将变更写入给定库（影子库 或 正式事务） ----------
 function applyChangesTo(db, resolved) {
   const insEvent = db.prepare(
@@ -682,6 +708,7 @@ function openShadow(sourceDb) {
   copy('shipment_items', 'id,shipment_id,roll_id,roll_code,release_id,release_at,release_by,allergen_set,roll_revision,qty');
   copy('shipment_dispositions', 'id,shipment_id,decision,decided_by,basis,expected_version,context_hash,context_snapshot,status_version,life_status,stale_reason,decided_at,created_at');
   copy('shipment_versions', 'shipment_id,version');
+  copy('downtime_windows', 'id,equipment_id,start_at,end_at,reason,operator,status,cancelled_at,cancelled_by,created_at,updated_at');
   shadow.pragma('foreign_keys = ON');
   return shadow;
 }
@@ -693,6 +720,9 @@ function simulate(db, changes) {
   const shadow = openShadow(db);
   try {
     const inserted = applyChangesTo(shadow, resolved);
+
+    // 停机窗口核对（影子库中的 ACTIVE 窗口；命中即拒绝，预演不写正式数据）。
+    assertChangesOutsideDowntime(shadow, resolved);
 
     const errors = validateAll(shadow);
     if (errors.length) {
@@ -808,6 +838,10 @@ function apply(db, body) {
     }
     const before = takeSnapshot(db);
     const inserted = applyChangesTo(db, resolved);
+
+    // 停机窗口核对：确认应用时按“最终设备 + 最终时间”重新核对一次
+    // （窗口变动已通过状态指纹使旧预演过期，这里为同事务内的显式再核对）。
+    assertChangesOutsideDowntime(db, resolved);
 
     const errors = validateAll(db);
     if (errors.length) {

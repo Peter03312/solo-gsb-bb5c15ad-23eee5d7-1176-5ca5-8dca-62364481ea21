@@ -242,6 +242,29 @@ function initSchema(d) {
     UNIQUE (backfill_id, external_ref)
   );
 
+  -- 设备停机（检修）窗口：左闭右开 [start_at, end_at)，起点必须早于终点。
+  -- 同设备窗口不可重叠（相邻允许）；登记/调整若覆盖已有加工/清洗事件，整次拒绝。
+  -- 窗口生效期间（status='ACTIVE'）该设备不能记录加工或清洗（单条写入、断网补录、
+  -- 换线整组预演/确认均按最终设备与时间核对窗口）。
+  -- 停机不是清洗：窗口不参与过敏原推导，不改变设备残留。
+  -- 取消（CANCELLED）为终态留痕：取消后不再拦截事件；取消后的窗口只能重新登记，不能再调整。
+  CREATE TABLE IF NOT EXISTS downtime_windows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    equipment_id INTEGER NOT NULL REFERENCES equipment(id),
+    start_at TEXT NOT NULL,                -- ISO 分钟精度，如 2026-10-02T13:00（含起点）
+    end_at TEXT NOT NULL,                  -- ISO 分钟精度（不含终点；相邻窗口允许首尾相接）
+    reason TEXT NOT NULL DEFAULT '',       -- 停机原因
+    operator TEXT NOT NULL DEFAULT '',     -- 登记/调整操作人
+    status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','CANCELLED')),
+    cancelled_at TEXT,
+    cancelled_by TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_downtime_windows_equipment
+    ON downtime_windows(equipment_id, start_at, end_at);
+
   CREATE INDEX IF NOT EXISTS idx_events_time ON events(event_time, id);
   CREATE INDEX IF NOT EXISTS idx_process_inputs_event ON process_inputs(event_id);
   CREATE INDEX IF NOT EXISTS idx_material_lots_material ON material_lots(material_id);

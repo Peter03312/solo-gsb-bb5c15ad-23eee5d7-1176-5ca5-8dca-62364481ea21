@@ -105,6 +105,21 @@ function seedIfEmpty() {
     matInput(e7, 'SALT-01');
 
     clean('15:00', lineA, '班后已核实清洗');
+
+    // 演示停机（检修）窗口：LINE-A 计划在 10/02 上午检修（ACTIVE，不含任何既有事件）；
+    // 另有一个 9/29 的窗口已取消（终态留痕，不再拦截事件）。
+    // 停机不等于清洗：窗口不参与推导、不改变设备残留与过敏原。
+    const insWindow = db.prepare(
+      `INSERT INTO downtime_windows
+         (equipment_id, start_at, end_at, reason, operator, status,
+          cancelled_at, cancelled_by)
+       VALUES (?,?,?,?,?,?,?,?)`
+    );
+    insWindow.run(lineA, '2026-10-02T08:30', '2026-10-02T11:30',
+      '计划检修：更换烤链张紧轮并保养', '设备员-周工', 'ACTIVE', null, '');
+    insWindow.run(fryerB, '2026-09-29T13:00', '2026-09-29T15:00',
+      '原定停机保养（临时改期，窗口已取消）', '设备员-周工',
+      'CANCELLED', '2026-09-28T16:00', '设备员-周工');
   });
   insertBase();
 

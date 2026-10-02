@@ -318,3 +318,11 @@ li.trace-trunc { color: #888; list-style: none; margin-left: -16px; }
 .clean-mode-line { display: flex; align-items: center; gap: 6px; margin: 4px 0; font-weight: normal; }
 #evCleanAllergens { margin-top: 6px; width: 100%; }
 .event-item.clean { border-left: 3px solid var(--accent, #4f7cc7); }
+
+/* 停机窗口：事件时间线顶部的生效窗口带 */
+.window-banners { display: flex; flex-direction: column; gap: 8px; margin: 10px 0 14px; }
+.window-banner {
+  background: #fbf1d6; border: 1px solid #e8d29a; color: #8a5d00;
+  border-radius: 8px; padding: 9px 12px; font-size: 13px; line-height: 1.6;
+}
+.window-banner .batch-meta { margin-left: 8px; }

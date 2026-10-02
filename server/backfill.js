@@ -21,6 +21,7 @@
 const crypto = require('crypto');
 const { validateAll } = require('./validation');
 const { recompute } = require('./recompute');
+const downtime = require('./downtime');
 
 const TIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/;
 
@@ -636,6 +637,24 @@ function submitBackfill(db, rawBody) {
       eventIdByRef.set(rec.external_ref, eid);
       insertedEvents.push({ external_ref: rec.external_ref, event_id: eid });
     }
+
+    // 停机窗口核对：按每条新写入记录（复用的既有事件不在其中）的最终设备与时间，
+    // 命中任一 ACTIVE 窗口即整次回滚（不改变事件、推导结果与补录台账）。
+    downtime.assertEventsAllowed(db, insertedEvents.map(({ external_ref, event_id }) => {
+      const ev = db.prepare('SELECT equipment_id, event_time FROM events WHERE id = ?').get(event_id);
+      return {
+        key: external_ref,
+        equipment_id: ev.equipment_id,
+        event_time: ev.event_time
+      };
+    }), {
+      describe: (spec) => {
+        const rec = resolved.find((x) => x.external_ref === spec.key);
+        return rec
+          ? `records[${rec.seq}]（外部记录号 ${rec.external_ref}，${rec.event_time}，设备 #${rec.equipment_id}）`
+          : `外部记录号 ${spec.key}（${spec.event_time}，设备 #${spec.equipment_id}）`;
+      }
+    });
 
     // 全量时间线校验：时间冲突、未来/同时刻引用、引用环、批次重复产出等。
     const errors = validateAll(db);

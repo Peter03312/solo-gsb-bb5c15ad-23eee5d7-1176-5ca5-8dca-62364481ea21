@@ -1,6 +1,6 @@
 'use strict';
 
-let state = { materials: [], equipment: [], events: [], batches: [], label_rolls: [], shipments: [] };
+let state = { materials: [], equipment: [], events: [], batches: [], label_rolls: [], shipments: [], downtime_windows: [] };
 let editingEventId = null;
 
 const $ = (sel) => document.querySelector(sel);
@@ -80,6 +80,7 @@ async function refresh() {
   renderEvents();
   renderBase();
   renderLots();
+  renderDowntime();
 }
 
 function renderResidue() {
@@ -334,6 +335,17 @@ function renderShipments() {
 }
 
 function renderEvents() {
+  // 生效中的停机窗口带：提示这些时段该设备不能录入加工/清洗（左闭右开）。
+  const activeWins = (state.downtime_windows || []).filter((w) => w.active);
+  $('#activeWindowBanners').innerHTML = activeWins.length
+    ? activeWins.map((w) => `
+      <div class="window-banner">
+        <b>⛔ 停机检修</b>
+        ${esc(w.equipment_name)}（${esc(w.equipment_code)}）
+        ${esc(fmtTime(w.start_at))} ~ ${esc(fmtTime(w.end_at))}（左闭右开）
+        <span class="batch-meta">${esc(w.reason || '')} ｜操作人 ${esc(w.operator || '—')}</span>
+      </div>`).join('')
+    : '';
   $('#eventList').innerHTML = state.events.map((ev) => {
     const eq = state.equipment.find((q) => q.id === ev.equipment_id);
     let body = '';
@@ -1303,6 +1315,112 @@ $('#traceForm').onsubmit = async (e) => {
   }
 };
 function eq2(eq) { return `${eq.equipment_name}（${eq.equipment_code}）`; }
+
+// ================= 停机（检修）窗口 =================
+function renderDowntime() {
+  // 设备下拉（筛选 + 弹窗共用）
+  const equipOptions = state.equipment
+    .map((q) => `<option value="${q.id}">${esc(q.name)}（${esc(q.code)}）</option>`).join('');
+  const filterSel = $('#windowFilterEquipment');
+  const filterVal = filterSel.value;
+  filterSel.innerHTML = '<option value="">全部设备</option>' + equipOptions;
+  filterSel.value = filterVal;
+  $('#windowEquipment').innerHTML = equipOptions;
+
+  const eqId = $('#windowFilterEquipment').value;
+  const status = $('#windowFilterStatus').value;
+  let wins = state.downtime_windows || [];
+  if (eqId) wins = wins.filter((w) => String(w.equipment_id) === String(eqId));
+  if (status) wins = wins.filter((w) => w.status === status);
+
+  $('#windowList').innerHTML = wins.length ? wins.map((w) => `
+    <div class="event-item ${w.status === 'CANCELLED' ? 'clean' : ''}">
+      <div class="event-head">
+        <span class="event-time">${esc(fmtTime(w.start_at))} ~ ${esc(fmtTime(w.end_at))}</span>
+        <span class="event-type ${w.status === 'ACTIVE' ? 'PROCESS' : 'CLEAN'}">
+          ${w.status === 'ACTIVE' ? '生效中' : '已取消'}</span>
+        <span class="batch-meta">${esc(w.equipment_name)}（${esc(w.equipment_code)}）</span>
+      </div>
+      <div class="event-inputs">
+        <b>原因：</b>${esc(w.reason) || '—'}｜<b>操作人：</b>${esc(w.operator) || '—'}
+        ${w.status === 'CANCELLED'
+          ? `｜<b>取消：</b>${esc(w.cancelled_by || '—')} ${w.cancelled_at ? esc(fmtTime(w.cancelled_at)) : ''}`
+          : ''}
+      </div>
+      <div class="event-actions">
+        ${w.status === 'ACTIVE'
+          ? `<button class="btn small" onclick='editWindow(${JSON.stringify(w).replace(/'/g, '&#39;')})'>调整</button>
+             <button class="btn small danger" onclick="cancelWindow(${w.id})">取消窗口</button>`
+          : '<span class="batch-meta">已取消（终态留痕，不可再调整）</span>'}
+      </div>
+    </div>`).join('')
+    : '<div class="batch-meta">没有符合条件的停机窗口。</div>';
+}
+window.renderDowntime = renderDowntime;
+
+$('#windowFilterForm').addEventListener('submit', (e) => e.preventDefault());
+['windowFilterEquipment', 'windowFilterStatus'].forEach((id) =>
+  $('#' + id).addEventListener('change', renderDowntime));
+
+function openWindowModal(win) {
+  const form = $('#windowForm');
+  form.reset();
+  $('#windowModalTitle').textContent = win ? '调整停机窗口' : '登记停机窗口';
+  $('#windowSubmitBtn').textContent = win ? '保存调整（整次校验）' : '登记窗口';
+  form.id.value = win ? win.id : '';
+  if (win) {
+    form.equipment_id.value = win.equipment_id;
+    form.start_at.value = win.start_at;
+    form.end_at.value = win.end_at;
+    form.reason.value = win.reason || '';
+    form.operator.value = win.operator || '';
+  }
+  $('#windowModal').classList.remove('hidden');
+}
+window.openWindowModal = openWindowModal;
+window.editWindow = (w) => openWindowModal(w);
+$('#btnNewWindow').onclick = () => openWindowModal(null);
+
+$('#windowForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  const body = {
+    equipment_id: parseInt(f.equipment_id.value, 10),
+    start_at: f.start_at.value,
+    end_at: f.end_at.value,
+    reason: f.reason.value.trim(),
+    operator: f.operator.value.trim()
+  };
+  const id = f.id.value;
+  try {
+    const r = id
+      ? await api('/api/downtime-windows/' + id, { method: 'PUT', body })
+      : await api('/api/downtime-windows', { method: 'POST', body });
+    $('#windowModal').classList.add('hidden');
+    notice('ok', id ? `停机窗口 #${r.id} 已调整` : `停机窗口 #${r.id} 已登记`);
+    await refresh();
+  } catch (err) {
+    const extra = (err.conflict_events || []).map((ev) =>
+      `冲突事件 #${ev.event_id}：${ev.type === 'PROCESS' ? '加工' : '清洗'} ${ev.event_time}` +
+      `${ev.batch_code ? '（' + ev.batch_code + '）' : ''}`);
+    notice('error', err.error || '停机窗口提交被拒绝', (err.details || []).concat(extra));
+  }
+});
+
+window.cancelWindow = async (id) => {
+  const by = prompt('取消操作人（留空则默认窗口登记操作人）：');
+  if (by === null) return;
+  try {
+    const r = await api(`/api/downtime-windows/${id}/cancel`, {
+      method: 'POST',
+      body: { cancelled_by: by.trim() }
+    });
+    notice('ok', `停机窗口 #${r.id} 已取消（终态，不再拦截事件）`);
+    await refresh();
+  } catch (err) {
+    notice('error', err.error || '取消失败', err.details);
+  }
+};
 
 // ================= 启动 =================
 refresh().catch((err) => notice('error', '加载状态失败', err.message || String(err)));
